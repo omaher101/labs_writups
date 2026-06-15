@@ -14,16 +14,40 @@ naturally flows into the next — nothing feels forced.
 
 ---
 
-## Recon
-Starting with a port scan revealed two web services running side by side...
+## Staring With Recon
+Starting with a port scan revealed two web services running side by side ( **Port 80 and 8081** ) in addition to SSH Port
 
-The newer site on **8081** had a password retrieval feature, but it
-required an API key I didn't have yet. So I turned my attention to
-the older site on **80**.
+<img width="1186" height="351" alt="image" src="https://github.com/user-attachments/assets/1d12552c-c231-4dcd-b4e0-1695a2f86803" />
 
-Fuzzing for hidden directories revealed something interesting:
-\```bash
-ffuf -u http://<ip>/.FUZZ -w /usr/share/wordlists/dirb/common.txt
+- **Port 80** — visiting it showed nothing but the word "OLD", 
+clearly an outdated site left running
+
+- **Port 8081** — a newer looking site, nothing particularly 
+interesting except one feature that caught my eye: a password 
+retrieval function in the *forget password* page that only required a username but it didn't seem to work.
+<img width="888" height="275" alt="image" src="https://github.com/user-attachments/assets/061cd505-e09e-4107-b397-9f8b0544c7b0" />
+
+## Digging Deeper
+
+With nothing obvious on the surface, I dug into the JavaScript 
+files on port 8081. Inside `forgot.js` I found something interesting:
+
+```javascript
+xhttp.send('{"key":"NULL"}') //Removed the API Key to stop the forget password functionality
+```
+
+The developer had removed the API key from the source code but left 
+a very telling comment behind — *"Removed the API Key to stop the 
+forget password functionality"*. 
+
+This told me two things:
+1. The API key existed at some point
+2. It was intentionally removed — likely from a git commit
+
+Which can be proven by checking the forget password page source:
+<img width="920" height="434" alt="image" src="https://github.com/user-attachments/assets/17581eb0-f6f6-4ac0-acdb-47ce6666fa27" />
+
+
 # Found: .git
 \```
 
