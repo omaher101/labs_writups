@@ -16,9 +16,20 @@ naturally flows into the next — nothing feels forced.
 
 ## Staring With Recon
 Starting with a port scan revealed two web services running side by side ( **Port 80 and 8081** ) in addition to SSH Port
-
-<img width="1186" height="351" alt="image" src="https://github.com/user-attachments/assets/1d12552c-c231-4dcd-b4e0-1695a2f86803" />
-
+```bash
+PORT     STATE SERVICE VERSION
+22/tcp   open  ssh     OpenSSH 7.6p1 Ubuntu 4ubuntu0.3 (Ubuntu Linux; protocol 2.0)
+| ssh-hostkey:
+|   2048 b2:4c:49:da:7c:9a:3a:ba:6e:59:46:c2:a9:e6:a2:35 (RSA)
+|   256 7a:3e:30:70:cf:32:a4:f2:0a:cb:2b:42:08:0c:19:bd (ECDSA)
+|_  256 4f:35:e1:33:96:84:5d:e5:b3:75:7d:d8:32:18:e0:a8 (ED25519)
+80/tcp   open  http    Apache httpd 2.4.29 ((Ubuntu))
+|_http-title: Site doesn't have a title (text/html).
+|_http-server-header: Apache/2.4.29 (Ubuntu)
+8081/tcp open  http    Werkzeug httpd 1.0.1 (Python 3.6.9)
+|_http-title: Site doesn't have a title (text/html; charset=utf-8).
+Service Info: OS: Linux; CPE: cpe:/o:linux:linux_kernel
+```
 - **Port 80** — visiting it showed nothing but the word "OLD", 
 clearly an outdated site left running
 
