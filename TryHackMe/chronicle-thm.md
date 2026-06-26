@@ -14,7 +14,7 @@ naturally flows into the next — nothing feels forced.
 
 ---
 
-## Staring With Recon
+## Starting With Recon
 Starting with a port scan revealed two web services running side by side ( **Port 80 and 8081** ) in addition to SSH Port
 ```bash
 PORT     STATE SERVICE VERSION
